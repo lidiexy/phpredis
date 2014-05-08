@@ -1,0 +1,1208 @@
+<?php
+/**
+ * Created by TextMate.
+ * User: lidiexy
+ * Date: 4/11/14
+ * Time: 5:09 PM
+ * Version: 0.1.0
+ */
+
+/**
+ * Class Redis
+ * @private $host
+ * @private $port
+ * @private $conn Connection handler
+ */
+
+class Redis {
+    const MAX_DB_COUNT = 15;
+    private $host;
+    private $port;
+    private $conn;
+
+    public function __construct($host = '127.0.0.1', $port = 6379) {
+        $this->host = $host;
+        $this->port = $port;
+    }
+
+    /**
+     * Function for create and get socket connection
+     * @return resource
+     * @throws Exception
+     */
+    private function getConnection() {
+        if(!$this->conn) {
+            if (!$sock = fsockopen($this->host, $this->port, $errno, $errstr)) {
+                $error_msg = "ERROR: $errno - $errstr.\n";
+                throw new Exception($error_msg);
+            }
+
+            $this->conn = $sock;
+        }
+        return $this->conn;
+    }
+
+    /**
+     * Close connection with Redis. Just the QUIT command.
+     * @return bool|string
+     */
+    private function closeConnection() {
+        if($this->conn) {
+            $cmd = 'QUIT';
+            $response = $this->executeCommand($cmd);
+            return $this->getError($response);
+        } else {
+            return false;
+        }
+    }
+
+    private function executeCommand($commands) {
+        $command = null;
+        $this->getConnection();
+        if (!$this->conn) return false;
+
+        if (is_array($commands)) {
+            $commands = implode("\r\n", $commands);
+        }
+
+        $command .= $commands . "\r\n";
+
+        $fwrite = 0;
+        for ($written = 0; $written < strlen($command); $written += $fwrite) {
+            if (!$fwrite = fwrite($this->conn, substr($command, $written))) {
+                return false;
+            }
+        }
+
+        return $this->getResponse();
+    }
+
+    private function getResponse() {
+        if (!$this->conn) return false;
+        return trim(fgets($this->conn), "\r\n ");
+    }
+
+    private function getError($response) {
+        if (strpos($response, '-ERR') === 0) {
+            return substr($response, 5);
+        }
+
+        return false;
+    }
+
+    /**
+     * Return formated string of $value to accept spaces in the string.
+     * @param $value
+     * @return string
+     */
+    private function generateValidValue(&$value) {
+        if(strpos($value, ' ') === false) {
+            return $value;
+        } else {
+            $value = trim($value, '"\' ');
+            return '"' . $value . '"';
+        }
+    }
+
+    private function validateEntry($key, &$value) {
+        if(empty($key) || !ctype_alnum($key) ) {
+            $error_msg = "ERROR: Redis server need alphanumeric key.\n";
+            throw new Exception($error_msg);
+        } elseif (empty($value)) {
+            $error_msg = "ERROR: This Redis class implementation deny empty values.\n";
+            throw new Exception($error_msg);
+        }
+
+        $value = $this->generateValidValue($value);
+        return true;
+    }
+
+    /**
+     * PING to Redis Server, must response +PONG
+     * @return bool|string
+     */
+    public function ping() {
+        return $this->executeCommand('PING');
+    }
+
+    /**
+     * Select database for Redis. The max number of database allowed is 15.
+     * @param int $db
+     * @return bool|string
+     * @throws Exception
+     */
+    public function selectDB($db = 0) {
+        if(($db < 0) && ($db > self::MAX_DB_COUNT)) {
+            $error_msg = "ERROR: The range of allowed index for DB is 0 - " . self::MAX_DB_COUNT . " for databases in Redis.\n";
+            throw new Exception($error_msg);
+        } else {
+            $cmd = 'SELECT ' . $db;
+            return $this->executeCommand($cmd);
+        }
+    }
+
+    /************ Scalar Operations ************/
+
+    /**
+     * Execute a SET command to Redis Scalar .
+     * $key must be alphanumeric
+     * $value can not be empty
+     * @param $key
+     * @param $value
+     * @return bool|string
+     */
+    public function set($key, $value) {
+        if($this->validateEntry($key, $value)) {
+            $cmd = 'SET ' . $key . ' ' . $value;
+            $response = $this->executeCommand($cmd);
+            return $this->getError($response);
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Execute a GET command to Redis Scalar.
+     * @param $key
+     * @return bool|string
+     */
+    public function get($key) {
+        $cmd = "GET " . $key;
+        $response = $this->executeCommand($cmd);
+        if ($this->getError($response)) {
+            return false;
+        }
+
+        $length = (int)substr($response, 1);
+        if ($length > 0) {
+            $value = $this->getResponse();
+            return $value;
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Execute a DEL command to Redis. Delete a key.
+     * @param $key
+     * @return bool|string
+     */
+    public function delete($key) {
+        $cmd = "DEL " . $key;
+        return $this->executeCommand($cmd);
+    }
+
+    /**
+     * Check if a key exists in Redis.
+     * @param $key
+     * @return bool
+     */
+    public function exists($key) {
+        $cmd = "EXISTS " . $key;
+        return $this->executeCommand($cmd) == ':1';
+    }
+
+    /**
+     * Increment any key by 1 or with the increment number defined by $by param.
+     * @param $key
+     * @param int $by
+     * @return string
+     */
+    public function inc($key, $by = 1) {
+        if(!isset($by) || $by === 1) {
+            $cmd = "INCR " . $key;
+        } else {
+            $cmd = "INCRBY " . $key . " " . $by;
+        }
+        $response = $this->executeCommand($cmd);
+        return substr($response, 1);
+    }
+
+    /**
+     * Decrement any key by 1 or with the decrement number defined by $by param.
+     * @param $key
+     * @param int $by
+     * @return string
+     */
+    public function dec($key, $by = 1) {
+        if(!isset($by) || $by === 1) {
+            $cmd = "DECR " . $key;
+        } else {
+            $cmd = "DECRBY " . $key . " " . $by;
+        }
+        $response = $this->executeCommand($cmd);
+        return substr($response, 1);
+    }
+
+    /**
+     * Append $value to scalar defined in $key.
+     * @param $key
+     * @param $value
+     * @return bool|string
+     */
+    public function appendToScalar($key, $value) {
+        if($this->validateEntry($key, $value)) {
+            $cmd = "APPEND " . $key . " " . $value;
+            $response = $this->executeCommand($cmd);
+            return substr($response, 1);
+        } else {
+            return $this->get($key);
+        }
+    }
+
+    /************ List Operations ************/
+
+    /**
+     * Return the length of the list, FALSE if an error was raised.
+     * @param $key
+     * @return int|bool
+     */
+    public function getListLength($key) {
+        $cmd = "LLEN " . $key;
+        $response = $this->executeCommand($cmd);
+        if ($this->getError($response)) {
+            return false;
+        }
+
+        return (int)substr($response, 1);
+    }
+
+    /**
+     * Insert to the top of list $key the element $value.
+     * @param $key
+     * @param $value
+     * @return bool|int|string Return the length of the list $key or error message
+     */
+    public function prependList($key, $value) {
+        if($this->validateEntry($key, $value)) {
+            $cmd = "LPUSH " . $key . " " . $value;
+            $response = $this->executeCommand($cmd);
+            if(!$this->getError($response)) {
+                return  (int) substr($response, 1);
+            } else {
+                return $this->getError($response);
+            }
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Add to the bottom of list $key the element $value.
+     * @param $key
+     * @param $value
+     * @return bool|int|string Return the length of the list $key or error message
+     */
+    public function appendList($key, $value) {
+        if($this->validateEntry($key, $value)) {
+            $cmd = "RPUSH " . $key . " " . $value;
+            $response = $this->executeCommand($cmd);
+            if(!$this->getError($response)) {
+                return  (int) substr($response, 1);
+            } else {
+                return $this->getError($response);
+            }
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Remove and get the first element in a $key list.
+     * @param $key
+     * @return bool|string
+     */
+    public function popFirstFromList($key) {
+        $cmd = "LPOP " . $key;
+        $response = $this->executeCommand($cmd);
+        if ($this->getError($response)) {
+            return false;
+        }
+
+        $length = (int)substr($response, 1);
+        if ($length > 0) {
+            $value = $this->getResponse();
+            return $value;
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Remove and get the last element in a $key list.
+     * @param $key
+     * @return bool|string
+     */
+    public function popLastFromList($key) {
+        $cmd = "RPOP " . $key;
+        $response = $this->executeCommand($cmd);
+        if ($this->getError($response)) {
+            return false;
+        }
+
+        $length = (int)substr($response, 1);
+        if ($length > 0) {
+            $value = $this->getResponse();
+            return $value;
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Return the elements of the list $key. The amount are defined by $limit and beginning from $offset.
+     * If no params then the function returns all the elements from the list $key.
+     * If $limit = 0 and $offset is not 0, then the function return all the elements beginning from $offset.
+     * Also this function permit negative values for $limit and guarantees the top elements from $offset start.
+     * @param $key
+     * @param int $limit Total count of elements.
+     * @param int $offset Start point to get the elements.
+     * @return array
+     */
+    public function getList($key, $limit = 0, $offset = 0) {
+        $start = $offset;
+        if($limit == 0) {
+            $end = $this->getListLength($key) - 1;
+        } elseif($limit < 0) {
+            $end = $limit;
+        } else {
+            $limit--;
+            $end = $start + $limit;
+        }
+
+        $cmd = 'LRANGE ' . $key . ' ' . $start .  ' ' . $end;
+        $response = $this->executeCommand($cmd);
+        if ($this->getError($response)) {
+            return false;
+        }
+
+        $count = (int)substr($response, 1);
+        $list = array();
+        for ($i = 0; $i < $count; $i++) {
+            $length = substr($this->getResponse(), 1);
+            $value = $this->getResponse();
+            $list[] = $value;
+        }
+
+        return $list;
+    }
+
+    /**
+     * Return the intersection of List defined by $key with the $filters array given.
+     * You may get the an array filtered with a range of elements.
+     * The amount are defined by $limit and beginning from $offset.
+     * @param $key
+     * @param array $filters
+     * @param int $limit
+     * @param int $offset
+     * @return array
+     */
+    public function getFilteredList($key, $filters = array(), $limit = 0, $offset = 0) {
+        $listToFilter = $this->getList($key, $limit, $offset);
+        if(sizeof($filters) == 0) {
+            return $listToFilter;
+        }
+
+        $list = array_intersect($listToFilter, $filters);
+
+        return $list;
+    }
+
+    /**
+     * Remove $count elements of the list $key with matching with $value.
+     * According with the syntax of Redis server, $count could be negative or positive number.
+     * It is mean that the search to remove $value start from top or bottom of the list.
+     * $count = 0 it's the same case of $count = +/- 1
+     * @param $key
+     * @param $value
+     * @param int $count
+     * @return bool|int
+     */
+    public function removeFromList($key, $value, $count = 0) {
+        $cmd = 'LREM ' . $key . ' ' . $count .  ' ' . $value;
+        $response = $this->executeCommand($cmd);
+        if ($this->getError($response)) {
+            return false;
+        }
+
+        return (int)substr($response, 1);
+    }
+
+    /**
+     * Remove the string or array of elements from $key list.
+     * @param $key
+     * @param $filters string|array
+     * @return bool|int
+     */
+    public function removeByFilter($key, $filters) {
+        if(!is_array($filters)) {
+            return $this->removeFromList($key, $filters);
+        } elseif(is_array($filters) && sizeof($filters) == 1) {
+            return $this->removeFromList($key, $filters);
+        } else {
+            $list = $this->getFilteredList($key, $filters);
+            foreach ($list as $item) {
+                $this->removeFromList($key, $item);
+            }
+            return true;
+        }
+    }
+
+    /**
+     * Truncate the list $key. The range are defined by $limit and beginning from $offset.
+     * Also this function permit negative values for $limit and slice the elements between $offset and $limit.
+     * @param $key
+     * @param int $limit
+     * @param int $offset
+     * @return bool
+     */
+    public function truncateList($key, $limit, $offset = 0) {
+        $start = $offset;
+        if($limit == 0) {
+            $end = $this->getListLength($key) - 1;
+        } elseif($limit < 0) {
+            $end = $limit;
+        } else {
+            $limit--;
+            $end = $start + $limit;
+        }
+
+        $cmd = 'LTRIM ' . $key . ' ' . $start .  ' ' . $end;
+        $response = $this->executeCommand($cmd);
+        if ($this->getError($response)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /************ Set Operations ************/
+
+    /**
+     * Add member $value to the set $set. Repeated values will not added to the set.
+     * @param $key
+     * @param $value
+     * @return bool
+     */
+    public function addSetMember($key, $value) {
+        if($this->validateEntry($key, $value)) {
+            $cmd = 'SADD ' . $key . ' ' . $value;
+            $response = $this->executeCommand($cmd);
+            return $response == ':1';
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Remove member $value from the set $set.
+     * @param $key
+     * @param $value
+     * @return bool
+     */
+    public function removeSetMember($key, $value) {
+        if($this->validateEntry($key, $value)) {
+            $cmd = 'SREM ' . $key . ' ' . $value;
+            $response = $this->executeCommand($cmd);
+            return $response == ':1';
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Check if $value is part of the set $set.
+     * @param $key
+     * @param $value
+     * @return bool
+     */
+    public function isSetMember($key, $value) {
+        if($this->validateEntry($key, $value)) {
+            $cmd = 'SISMEMBER ' . $key . ' ' . $value;
+            $response = $this->executeCommand($cmd);
+            return $response == ':1';
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Return the array of members of the set $key.
+     * @param $key
+     * @return array|bool
+     */
+    public function getSetMembers($key) {
+        $cmd = 'SMEMBERS ' . $key;
+        $response = $this->executeCommand($cmd);
+        if ($this->getError($response)) {
+            return false;
+        }
+
+        $count = (int)substr($response, 1);
+        $list = array();
+        for ($i = 0; $i < $count; $i++) {
+            $length = substr($this->getResponse(), 1);
+            $value = $this->getResponse();
+            $list[] = $value;
+        }
+
+        return $list;
+    }
+
+    /**
+     * Get the length or the number of members in a set defined by $key.
+     * @param $key
+     * @return bool|int
+     */
+    public function getSetLength($key) {
+        $cmd = "SCARD " . $key;
+        $response = $this->executeCommand($cmd);
+        if ($this->getError($response)) {
+            return false;
+        }
+
+        return (int)substr($response, 1);
+    }
+
+    /**
+     * Subtract multiple sets and return the array of elements of the operation.
+     * @param $key_resulted
+     * @param $key_search string|array
+     * @return array|bool
+     */
+    public function diffSet($key_resulted, $key_search) {
+        if(!is_array($key_search)) {
+            $cmd = 'SDIFF ' . $key_resulted . ' ' . $key_search;
+            $response = $this->executeCommand($cmd);
+            if ($this->getError($response)) {
+                return false;
+            }
+        } elseif(is_array($key_search) && sizeof($key_search) == 1) {
+            $cmd = 'SDIFF ' . $key_resulted . ' ' . $key_search[0];
+            $response = $this->executeCommand($cmd);
+            if ($this->getError($response)) {
+                return false;
+            }
+        } else {
+            $cmd = 'SDIFF ' . $key_resulted . ' ';
+            foreach ($key_search as $key) {
+                $cmd .= $key . ' ';
+            }
+            $cmd = rtrim($cmd);
+            $response = $this->executeCommand($cmd);
+            if ($this->getError($response)) {
+                return false;
+            }
+        }
+
+        $count = (int)substr($response, 1);
+        $list = array();
+        for ($i = 0; $i < $count; $i++) {
+            $length = substr($this->getResponse(), 1);
+            $value = $this->getResponse();
+            $list[] = $value;
+        }
+
+        return $list;
+    }
+
+    /**
+     * Subtract multiple sets and store the resulting set in a key
+     * @param $destination_key
+     * @param $key_resulted
+     * @param $key_search string|array
+     * @return bool|string
+     */
+    public function diffSetStored($destination_key, $key_resulted, $key_search) {
+        if(!is_array($key_search)) {
+            $cmd = 'SDIFFSTORE ' . $destination_key . ' ' . $key_resulted . ' ' . $key_search;
+            $response = $this->executeCommand($cmd);
+            return $this->getError($response);
+        } elseif(is_array($key_search) && sizeof($key_search) == 1) {
+            $cmd = 'SDIFFSTORE ' . $destination_key . ' ' . $key_resulted . ' ' . $key_search[0];
+            $response = $this->executeCommand($cmd);
+            return $this->getError($response);
+        } else {
+            $cmd = 'SDIFFSTORE ' . $destination_key . ' ' . $key_resulted . ' ';
+            foreach ($key_search as $key) {
+                $cmd .= $key . ' ';
+            }
+            $cmd = rtrim($cmd);
+            $response = $this->executeCommand($cmd);
+            return $this->getError($response);
+        }
+    }
+
+    /************ Ordered Set Operations ************/
+
+    /**
+     * Add one or more members to a sorted set, or update its score if it already exists.
+     * $assoc_array have the form [value => score] where the KEY of the array is the Ni {value} of $key
+     * and the VALUE for that KEY is the Ni {score} associated.
+     * @param $key
+     * @param $assoc_array
+     * @return bool
+     */
+    public function addSortedSetMember($key, $assoc_array) {
+        if(is_array($assoc_array)) {
+            $cmd = 'ZADD ' . $key . ' ';
+            foreach ($assoc_array as $value => $score) {
+                $cmd .= $score . ' ' . $value . ' ';
+            }
+            $cmd = rtrim($cmd);
+            $response = $this->executeCommand($cmd);
+            if ($this->getError($response)) {
+                return false;
+            }
+            return (int)substr($response, 1);
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Get the number of members in a sorted set.
+     * @param $key
+     * @return bool|int
+     */
+    public function getSortedSetLength($key) {
+        $cmd = "ZCARD " . $key;
+        $response = $this->executeCommand($cmd);
+        if ($this->getError($response)) {
+            return false;
+        }
+
+        return (int)substr($response, 1);
+    }
+
+    /**
+     * Count the members in a sorted set with scores within the given values [$min, $max].
+     * @param $key
+     * @param $min
+     * @param $max
+     * @return bool|int
+     * @throws Exception
+     */
+    public function getSortedSetCountWithRangeOfScore($key, $min, $max) {
+        if($min > $max) {
+            $error_msg = "ERROR: The argument \$min must be leather than \$max argument.\n";
+            throw new Exception($error_msg);
+        }
+        $cmd = "ZCOUNT " . $key . ' ' . $min . ' ' . $max;
+        $response = $this->executeCommand($cmd);
+        if ($this->getError($response)) {
+            return false;
+        }
+
+        return (int)substr($response, 1);
+    }
+
+
+    /**
+     * Return a range of members in a sorted set, by index.
+     * The array returned have the form [value => score] when the argument $with_score = TRUE.
+     * If the argument $with_score = FALSE then the array will return [# => value].
+     * @param $key
+     * @param int $limit
+     * @param int $offset
+     * @param bool $with_score
+     * @return array|bool
+     */
+    public function getSortedSetRangeByIndex($key, $limit = 0, $offset = 0, $with_score = false) {
+        $start = $offset;
+        if($limit == 0) {
+            $end = $this->getSortedSetLength($key) - 1;
+        } elseif($limit < 0) {
+            $end = $limit;
+        } else {
+            $limit--;
+            $end = $start + $limit;
+        }
+
+        $cmd = 'ZRANGE ' . $key . ' ' . $start .  ' ' . $end;
+        if($with_score) {
+            $cmd .= ' WITHSCORES';
+        }
+        $response = $this->executeCommand($cmd);
+        if ($this->getError($response)) {
+            return false;
+        }
+
+        $count = (int)substr($response, 1);
+        $list = array();
+        $value = '';
+        for ($i = 0; $i < $count; $i++) {
+            $length = substr($this->getResponse(), 1);
+            if($with_score) {
+                if($i % 2 == 0) {
+                    $value = $this->getResponse();
+                } else {
+                    $score = $this->getResponse();
+                    $list[$value] = $score;
+                }
+            } else {
+                $value = $this->getResponse();
+                $list[] = $value;
+            }
+        }
+
+        return $list;
+    }
+
+    /**
+     * Return a range of members in a sorted set, by score.
+     * The array returned have the form [value => score] when the argument $with_score = TRUE.
+     * If the argument $with_score = FALSE then the array will return [# => value].
+     * @param $key
+     * @param $min
+     * @param $max
+     * @param bool $with_score
+     * @param int $limit
+     * @param int $offset
+     * @return array|bool
+     * @throws Exception
+     */
+    public function getSortedSetRangeByScore($key, $min, $max, $with_score = false, $limit = 0, $offset = 0) {
+        if($min > $max) {
+            $error_msg = "ERROR: The argument \$min must be leather than \$max argument.\n";
+            throw new Exception($error_msg);
+        }
+
+        $start = $offset;
+        if($limit <= 0) {
+            $end = $this->getSortedSetLength($key) - 1;
+        } else {
+            $limit--;
+            $end = $start + $limit;
+        }
+
+        $cmd = 'ZRANGEBYSCORE ' . $key . ' ' . $min .  ' ' . $max;
+        if($with_score) {
+            $cmd .= ' WITHSCORES';
+        }
+        $cmd .= ' LIMIT ' . $start . ' ' . $end;
+
+        $response = $this->executeCommand($cmd);
+        if ($this->getError($response)) {
+            return false;
+        }
+
+        $count = (int)substr($response, 1);
+        $list = array();
+        $value = '';
+        for ($i = 0; $i < $count; $i++) {
+            $length = substr($this->getResponse(), 1);
+            if($with_score) {
+                if($i % 2 == 0) {
+                    $value = $this->getResponse();
+                } else {
+                    $score = $this->getResponse();
+                    $list[$value] = $score;
+                }
+            } else {
+                $value = $this->getResponse();
+                $list[] = $value;
+            }
+        }
+
+        return $list;
+    }
+
+
+    /**
+     * Determine the index of a member in a sorted set.
+     * @param $key
+     * @param $member
+     * @return bool|int
+     */
+    public function getSortedSetRank($key, $member) {
+        if($this->validateEntry($key, $member)) {
+            $cmd = "ZRANK " . $key . ' ' . $member;
+            $response = $this->executeCommand($cmd);
+            if ($this->getError($response)) {
+                return false;
+            }
+            return (int)substr($response, 1);
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Get the score associated with the given member in a sorted set.
+     * @param $key
+     * @param $member
+     * @return bool|string
+     */
+    public function getSortedSetScore($key, $member) {
+        if($this->validateEntry($key, $member)) {
+            $cmd = "ZSCORE " . $key . ' ' . $member;
+            $response = $this->executeCommand($cmd);
+            if ($this->getError($response)) {
+                return false;
+            }
+            return $this->getResponse();
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Remove one or more members from a sorted set.
+     * The argument $array_members must be an array instead it have jus one member.
+     * @param $key
+     * @param array $array_members
+     * @return bool|int
+     */
+    public function removeFromSortedSet($key, $array_members) {
+        if(is_array($array_members)) {
+            $cmd = 'ZREM ' . $key . ' ';
+            foreach ($array_members as $member) {
+                $cmd .= $member . ' ';
+            }
+            $cmd = rtrim($cmd);
+            $response = $this->executeCommand($cmd);
+            if ($this->getError($response)) {
+                return false;
+            }
+            return (int)substr($response, 1);
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Remove all members in a sorted set within the given indexes.
+     * @param $key
+     * @param int $start
+     * @param int $end
+     * @return bool|int
+     */
+    public function removeFromSortedSetByRank($key, $start = 0, $end = -1) {
+        if($end == -1) {
+            $end = $this->getSortedSetLength($key) - 1;
+        }
+
+        $cmd = 'ZREMRANGEBYRANK ' . $key . ' ' . $start . ' ' . $end;
+        $response = $this->executeCommand($cmd);
+        if ($this->getError($response)) {
+            return false;
+        }
+
+        return (int)substr($response, 1);
+    }
+
+    /**
+     * Remove all members in a sorted set within the given scores.
+     * @param $key
+     * @param $min
+     * @param $max
+     * @return bool|int
+     * @throws Exception
+     */
+    public function removeFromSortedSetByScore($key, $min, $max) {
+        if($min > $max) {
+            $error_msg = "ERROR: The argument \$min must be leather than \$max argument.\n";
+            throw new Exception($error_msg);
+        }
+
+        $cmd = 'ZREMRANGEBYSCORE ' . $key . ' ' . $min . ' ' . $max;
+        $response = $this->executeCommand($cmd);
+        if ($this->getError($response)) {
+            return false;
+        }
+
+        return (int)substr($response, 1);
+    }
+
+    /************ Hash Operations ************/
+
+    /**
+     * Set the string value of a hash field.
+     * @param $key
+     * @param $field
+     * @param $value
+     * @return bool|string
+     */
+    public function setHash($key, $field, $value) {
+        if($this->validateEntry($field, $value) && (!empty($key)) && ctype_alnum($key)) {
+            $cmd = 'HSET ' . $key . ' ' . $field . ' ' . $value;
+            $response = $this->executeCommand($cmd);
+            return $this->getError($response);
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Set the value of a hash field, only if the field does not exist.
+     * @param $key
+     * @param $field
+     * @param $value
+     * @return bool|string
+     */
+    public function setHashIfFieldNotExist($key, $field, $value) {
+        if($this->validateEntry($field, $value) && (!empty($key)) && ctype_alnum($key)) {
+            $cmd = 'HSETNX ' . $key . ' ' . $field . ' ' . $value;
+            $response = $this->executeCommand($cmd);
+            return $this->getError($response);
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Set multiple hash fields to multiple values.
+     * The argument $assoc_array have the form [field => value].
+     * @param $key
+     * @param array $assoc_array
+     * @return bool|int
+     */
+    public function setHashMultiFields($key, $assoc_array) {
+        if(is_array($assoc_array)) {
+            $cmd = 'HMSET ' . $key . ' ';
+            foreach ($assoc_array as $field => $value) {
+                $cmd .= $field . ' ' . $value . ' ';
+            }
+            $cmd = rtrim($cmd);
+            $response = $this->executeCommand($cmd);
+            if ($this->getError($response)) {
+                return false;
+            }
+            return (int)substr($response, 1);
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Get the number of fields in a hash.
+     * @param $key
+     * @return bool|int
+     */
+    public function getHashLength($key) {
+        $cmd = "HLEN " . $key;
+        $response = $this->executeCommand($cmd);
+        if ($this->getError($response)) {
+            return false;
+        }
+
+        return (int)substr($response, 1);
+    }
+
+    /**
+     * Determine if a hash field exists.
+     * @param $key
+     * @param $field
+     * @return bool
+     */
+    public function existsHashField($key, $field) {
+        $cmd = 'HEXISTS ' . $key . ' ' . $field;
+        return $this->executeCommand($cmd) == ':1';
+    }
+
+    /**
+     * Delete one or more hash fields.
+     * The argument $array_fields must be an array with the fields that will be removed from the hash $key.
+     * @param $key
+     * @param $array_fields
+     * @return bool|int FALSE if Error occurred or the number of fields that have been removed.
+     */
+    public function deleteHashFields($key, $array_fields) {
+        if(is_array($array_fields)) {
+            $cmd = 'HDEL ' . $key . ' ';
+            foreach ($array_fields as $field) {
+                $cmd .= $field . ' ';
+            }
+            $cmd = rtrim($cmd);
+            $response = $this->executeCommand($cmd);
+            if ($this->getError($response)) {
+                return false;
+            }
+            return (int)substr($response, 1);
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Get the value of a hash field.
+     * @param $key
+     * @param $field
+     * @return bool|string
+     */
+    public function getHashField($key, $field) {
+        $cmd = 'HGET ' . $key . ' ' . $field;
+        $response = $this->executeCommand($cmd);
+        if ($this->getError($response)) {
+            return false;
+        }
+
+        $length = (int)substr($response, 1);
+        if ($length > 0) {
+            $value = $this->getResponse();
+            return $value;
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Get all the fields and values in a hash.
+     * Return associative array with the {field} as KEY and the value of the {field} as the VALUE.
+     * An empty array is returned if the $key does not exists.
+     * @param $key
+     * @return array|bool
+     */
+    public function getHashAll($key) {
+        if($this->exists($key)) {
+            $cmd = 'HGETALL ' . $key;
+            $response = $this->executeCommand($cmd);
+            if ($this->getError($response)) {
+                return false;
+            }
+
+            $count = (int)substr($response, 1);
+            $list = array();
+            $field = '';
+            for ($i = 0; $i < $count; $i++) {
+                $length = substr($this->getResponse(), 1);
+                if($i % 2 == 0) {
+                    $field = $this->getResponse();
+                } else {
+                    $value = $this->getResponse();
+                    $list[$field] = $value;
+                }
+            }
+
+            return $list;
+        } else {
+            return array();
+        }
+    }
+
+    /**
+     * Get all the fields in a hash.
+     * An empty array is returned if the $key does not exists.
+     * @param $key
+     * @return array|bool
+     */
+    public function getHashFields($key) {
+        if($this->exists($key)) {
+            $cmd = 'HKEYS ' . $key;
+            $response = $this->executeCommand($cmd);
+            if ($this->getError($response)) {
+                return false;
+            }
+
+            $count = (int)substr($response, 1);
+            $list = array();
+            for ($i = 0; $i < $count; $i++) {
+                $length = substr($this->getResponse(), 1);
+                $field = $this->getResponse();
+                $list[] = $field;
+            }
+
+            return $list;
+        } else {
+            return array();
+        }
+    }
+
+    /**
+     * Get the values of all the given hash fields. The fields must be specified in the argument $array_fields.
+     * @param $key
+     * @param $array_fields
+     * @return array|bool
+     */
+    public function getHashMultiFields($key, $array_fields) {
+        if($this->exists($key)) {
+            if(is_array($array_fields)) {
+                $cmd = 'HMGET ' . $key;
+                foreach ($array_fields as $field) {
+                    $cmd .= $field . ' ';
+                }
+                $cmd = rtrim($cmd);
+                $response = $this->executeCommand($cmd);
+                if ($this->getError($response)) {
+                    return false;
+                }
+
+                $count = (int)substr($response, 1);
+                $list = array();
+                for ($i = 0; $i < $count; $i++) {
+                    $length = substr($this->getResponse(), 1);
+                    $value = $this->getResponse();
+                    $list[] = $value;
+                }
+
+                return $list;
+            } else {
+                return false;
+            }
+        } else {
+            return array();
+        }
+    }
+
+    /**
+     * Get all the values in a hash.
+     * @param $key
+     * @return array|bool
+     */
+    public function getHashValues($key) {
+        if($this->exists($key)) {
+            $cmd = 'HVALS ' . $key;
+            $response = $this->executeCommand($cmd);
+            if ($this->getError($response)) {
+                return false;
+            }
+
+            $count = (int)substr($response, 1);
+            $list = array();
+            for ($i = 0; $i < $count; $i++) {
+                $length = substr($this->getResponse(), 1);
+                $value = $this->getResponse();
+                $list[] = $value;
+            }
+
+            return $list;
+        } else {
+            return array();
+        }
+    }
+
+    /**
+     * Increment the integer or float value of a hash field by the given increment $by.
+     * Return an string value with the result.
+     * @param $key
+     * @param $field
+     * @param int|float $by
+     * @return string
+     */
+    public function incHashField($key, $field, $by = 1) {
+        if(is_float($by)) {
+            $cmd = 'HINCRBYFLOAT ' . $key . ' ' . $field . ' ' . $by;
+        } else {
+            $cmd = 'HINCRBY ' . $key . ' ' . $field . ' ' . $by;
+        }
+        $response = $this->executeCommand($cmd);
+        return $this->getResponse();
+    }
+
+    /************ Destructor ************/
+
+    /**
+     * Close the connection and release the socket.
+     */
+    public function __destruct() {
+        if($this->conn) {
+            $this->closeConnection();
+            unset ($this->host, $this->port);
+            return fclose($this->conn);
+        }
+        unset ($this->host, $this->port);
+        return true;
+    }
+
+} //END of class Redis
